@@ -26,6 +26,66 @@ from time import time
 from collections import defaultdict
 from multiprocessing import Process, Pipe
 
+# Spectral step size.
+def step_ls(p, d):
+	sd = d.dot(d)/p.dot(d)   # Steepest descent
+	mg = p.dot(d)/p.dot(p)   # Minimum gradient
+	
+	if 2*mg > sd:
+		return mg
+	else:
+		return (sd - mg)
+
+# Step size correlation.
+def step_cor(p, d):
+	return p.cor(d)/np.sqrt(p.dot(p)*d.dot(d))
+
+# Safeguarding rule.
+def step_safe(a, b, a_cor, b_cor, tau, eps = 0.2):
+	if a_cor > eps and b_cor > eps:
+		return np.sqrt(a*b)
+	elif a_cor > eps and b_cor <= eps:
+		return a
+	elif a_cor <= eps and b_cor > eps:
+		return b
+	else:
+		return tau
+
+def step_spec(rho, du, dv, dl, dl_h, k, eps = 0.2, C = 1e10):
+	# Compute spectral step sizes
+	a_hat = step_ls(du, dl_h)
+	b_hat = step_ls(dv, dl)
+	
+	# Estimate correlations
+	a_cor = step_cor(du, dl_h)
+	b_cor = step_cor(dv, dl)
+	
+	# Update step size
+	scale = 1 + C/(1.0*k**2)
+	rho_hat = step_safe(a_hat, b_hat, a_cor, b_cor, rho, eps)
+	return max(min(rho_hat, scale*rho), rho/scale)
+
+def proc_results(p_list, xbars):
+	# TODO: Handle statuses.
+	
+	# Save primal values.
+	pvars = [p.variables() for p in p_list]
+	pvars = list(set().union(*pvars))
+	for x in pvars:
+		x.save_value(xbars[x.id])
+	
+	# TODO: Save dual values (for constraints too?).
+	
+	# Compute full objective.
+	val = 0
+	for p in p_list:
+		# Flip sign of objective if maximization.
+		if isinstance(p.objective, Minimize):
+			val += p.objective.value
+		else:
+			val -= p.objective.value
+	return val
+
 def run_worker(p, rho, pipe):
 	# Flip sign of objective if maximization.
 	if isinstance(p.objective, Minimize):
@@ -41,7 +101,7 @@ def run_worker(p, rho, pipe):
 		size = xvar.size
 		v[xid] = {"x": xvar, "xbar": Parameter(size[0], size[1], value = np.zeros(size)),
 				  "u": Parameter(size[0], size[1], value = np.zeros(size))}
-		f += (rho/2.0)*sum_squares(xvar - v[xid]["xbar"] - v[xid]["u"])
+		f += (rho/2.0)*sum_squares(xvar - v[xid]["xbar"] - v[xid]["u"]/rho)
 	prox = Problem(Minimize(f), cons)
 	
 	# ADMM loop.
@@ -53,10 +113,10 @@ def run_worker(p, rho, pipe):
 		pipe.send(xvals)
 		
 		# Update u += x - x_bar.
-		xbars = pipe.recv()
+		xbars, i = pipe.recv()
 		for key in v.keys():
 			v[key]["xbar"].value = xbars[key]
-			v[key]["u"].value += v[key]["x"].value - v[key]["xbar"].value
+			v[key]["u"].value += rho*(v[key]["x"].value - v[key]["xbar"].value)
 
 def consensus(p_list, rho_list = None, max_iter = 100):
 	# Number of problems.
@@ -92,13 +152,14 @@ def consensus(p_list, rho_list = None, max_iter = 100):
 	
 		# Scatter x_bar.
 		for pipe in pipes:
-			pipe.send(xbars)
+			pipe.send((xbars, i))
 	end = time()
 
 	[p.terminate() for p in procs]
-	return xbars, (end - start)
+	obj_val = proc_results(p_list, xbars)
+	return obj_val, (end - start)
 
-def get_combined_prob(p_list):
+def solve_combined(p_list):
 	obj = 0
 	cons = []
 	for p in p_list:
@@ -110,7 +171,7 @@ def get_combined_prob(p_list):
 		cons += p.constraints
 
 	prob = Problem(Minimize(obj), cons)
-	return prob
+	return prob.solve()
 
 def basic_test():
 	np.random.seed(1)
@@ -131,21 +192,24 @@ def basic_test():
 			  Problem(Minimize((1-alpha)*sum_squares(y)/2))
 			 ]
 	N = len(p_list)   # Number of problems.
+	pvars = [p.variables() for p in p_list]
+	pvars = list(set().union(*pvars))   # Variables of problems.
 	
 	# Solve with consensus ADMM.
-	xbars, elapsed = consensus(p_list, rho_list = N*[1.0], max_iter = max_iter)
+	obj_admm, elapsed = consensus(p_list, rho_list = N*[0.5], max_iter = max_iter)
+	x_admm = [x.value for x in pvars]
 
 	# Solve combined problem.
-	p_comb = get_combined_prob(p_list)
-	p_comb.solve()
+	obj_comb = solve_combined(p_list)
+	x_comb = [x.value for x in pvars]
 
 	# Compare results.
-	pvars = [p.variables() for p in p_list]
-	pvars = list(set().union(*pvars))
-	for x in pvars:
-		print x, "ADMM Solution:\n", xbars[x.id]
-		print x, "Base Solution:\n", x.value
-		print x, "MSE: ", np.mean(np.square(xbars[x.id] - x.value))
+	for i in range(N):
+		print "ADMM Solution:\n", x_admm[i]
+		print "Base Solution:\n", x_comb[i]
+		print "MSE: ", np.mean(np.square(x_admm[i] - x_comb[i])), "\n"
+	print "ADMM Objective: %f" % obj_admm
+	print "Base Objective: %f" % obj_comb
 	print "Elapsed Time: %f" % elapsed
 
 from cvxpy import *
