@@ -28,8 +28,8 @@ from multiprocessing import Process, Pipe
 
 # Spectral step size.
 def step_ls(p, d):
-	sd = d.dot(d)/p.dot(d)   # Steepest descent
-	mg = p.dot(d)/p.dot(p)   # Minimum gradient
+	sd = np.sum(d**2)/np.sum(p*d)   # Steepest descent
+	mg = np.sum(p*d)/np.sum(p**2)   # Minimum gradient
 	
 	if 2*mg > sd:
 		return mg
@@ -38,7 +38,7 @@ def step_ls(p, d):
 
 # Step size correlation.
 def step_cor(p, d):
-	return p.cor(d)/np.sqrt(p.dot(p)*d.dot(d))
+	return np.sum(p*d)/np.sqrt(np.sum(p**2)*np.sum(d**2))
 
 # Safeguarding rule.
 def step_safe(a, b, a_cor, b_cor, tau, eps = 0.2):
@@ -51,14 +51,14 @@ def step_safe(a, b, a_cor, b_cor, tau, eps = 0.2):
 	else:
 		return tau
 
-def step_spec(rho, du, dv, dl, dl_h, k, eps = 0.2, C = 1e10):
+def step_spec(rho, dx, dxbar, du, duhat, k, eps = 0.2, C = 1e10):
 	# Compute spectral step sizes
-	a_hat = step_ls(du, dl_h)
-	b_hat = step_ls(dv, dl)
+	a_hat = step_ls(dx, duhat)
+	b_hat = step_ls(dxbar, du)
 	
 	# Estimate correlations
-	a_cor = step_cor(du, dl_h)
-	b_cor = step_cor(dv, dl)
+	a_cor = step_cor(dx, duhat)
+	b_cor = step_cor(dxbar, du)
 	
 	# Update step size
 	scale = 1 + C/(1.0*k**2)
@@ -86,7 +86,12 @@ def proc_results(p_list, xbars):
 			val -= p.objective.value
 	return val
 
-def run_worker(p, rho, pipe):
+def run_worker(p, rho_init, pipe):
+	# TODO: Make these user parameters
+	Tf = 2
+	eps = 0.2
+	C = 1e10
+	
 	# Flip sign of objective if maximization.
 	if isinstance(p.objective, Minimize):
 		f = p.objective.args[0]
@@ -96,6 +101,7 @@ def run_worker(p, rho, pipe):
 	
 	# Add penalty for each variable.
 	v = {}
+	rho = Parameter(1, 1, value = rho_init, sign = "positive")
 	for xvar in p.variables():
 		xid = xvar.id
 		size = xvar.size
@@ -103,6 +109,11 @@ def run_worker(p, rho, pipe):
 				  "u": Parameter(size[0], size[1], value = np.zeros(size))}
 		f += (rho/2.0)*sum_squares(xvar - v[xid]["xbar"] - v[xid]["u"]/rho)
 	prox = Problem(Minimize(f), cons)
+	
+	# Initiate step size variables.
+	size_all = np.prod([np.prod(xvar.size) for xvar in p.variables()])
+	v_old = {"x": np.zeros(size_all), "xbar": np.zeros(size_all),
+			 "u": np.zeros(size_all), "uhat": np.zeros(size_all)}
 	
 	# ADMM loop.
 	while True:
@@ -114,9 +125,38 @@ def run_worker(p, rho, pipe):
 		
 		# Update u += x - x_bar.
 		xbars, i = pipe.recv()
+		v_flat = {"x": [], "xbar": [], "u": [], "uhat": []}
 		for key in v.keys():
+			xbar_old = v[key]["xbar"].value
+			u_old = v[key]["u"].value
+			
 			v[key]["xbar"].value = xbars[key]
-			v[key]["u"].value += rho*(v[key]["x"].value - v[key]["xbar"].value)
+			v[key]["u"].value += (rho*(v[key]["x"] - v[key]["xbar"])).value
+			v_flat["uhat"] += [(u_old + rho*(xbar_old - v[key]["u"])).value.flatten()]
+		
+		if i % Tf == 1:
+			# Collect and flatten variables.
+			for key in v.keys():
+				v_flat["x"] += [v[key]["x"].value.flatten()]
+				v_flat["xbar"] += [v[key]["xbar"].value.flatten()]
+				v_flat["u"] += [v[key]["u"].value.flatten()]
+			
+			# BUG: Need to flatten into a single array vector
+			for key in v_flat.keys():
+				v_flat[key] = np.array(v_flat[key])
+			
+			# Calculate change from old iterate.
+			dx = v_flat["x"] - v_old["x"]
+			dxbar = -v_flat["xbar"] + v_flat["xbar"]
+			du = v_flat["u"] - v_old["u"]
+			duhat = v_flat["uhat"] - v_old["uhat"]
+			
+			# Update step size.
+			rho.value = step_spec(rho.value, dx, dxbar, du, duhat, i, eps, C)
+			
+			# Update step size variables.
+			for key in v_flat.keys():
+				v_old[key] = v_flat[key]
 
 def consensus(p_list, rho_list = None, max_iter = 100):
 	# Number of problems.
