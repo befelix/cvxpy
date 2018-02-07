@@ -52,15 +52,20 @@ def step_safe(a, b, a_cor, b_cor, tau, eps = 0.2):
 		return tau
 
 def step_spec(rho, dx, dxbar, du, duhat, k, eps = 0.2, C = 1e10):
-	# Compute spectral step sizes
+	# Use old step size if unable to solve LS problem/correlations.
+	if sum(dx**2) == 0 or sum(dxbar**2) == 0 or \
+	   sum(du**2) == 0 or sum(duhat**2) == 0:
+	   return rho
+	
+	# Compute spectral step sizes.
 	a_hat = step_ls(dx, duhat)
 	b_hat = step_ls(dxbar, du)
 	
-	# Estimate correlations
+	# Estimate correlations.
 	a_cor = step_cor(dx, duhat)
 	b_cor = step_cor(dxbar, du)
 	
-	# Update step size
+	# Update step size.
 	scale = 1 + C/(1.0*k**2)
 	rho_hat = step_safe(a_hat, b_hat, a_cor, b_cor, rho, eps)
 	return max(min(rho_hat, scale*rho), rho/scale)
@@ -132,18 +137,20 @@ def run_worker(p, rho_init, pipe):
 			
 			v[key]["xbar"].value = xbars[key]
 			v[key]["u"].value += (rho*(v[key]["x"] - v[key]["xbar"])).value
-			v_flat["uhat"] += [(u_old + rho*(xbar_old - v[key]["u"])).value.flatten()]
+			
+			# Intermediate variable for step size update.
+			u_hat = u_old + rho*(xbar_old - v[key]["u"])
+			v_flat["uhat"] += [np.asarray(u_hat.value).reshape(-1)]
 		
 		if i % Tf == 1:
 			# Collect and flatten variables.
 			for key in v.keys():
-				v_flat["x"] += [v[key]["x"].value.flatten()]
-				v_flat["xbar"] += [v[key]["xbar"].value.flatten()]
-				v_flat["u"] += [v[key]["u"].value.flatten()]
+				v_flat["x"] += [np.asarray(v[key]["x"].value).reshape(-1)]
+				v_flat["xbar"] += [np.asarray(v[key]["xbar"].value).reshape(-1)]
+				v_flat["u"] += [np.asarray(v[key]["u"].value).reshape(-1)]
 			
-			# BUG: Need to flatten into a single array vector
 			for key in v_flat.keys():
-				v_flat[key] = np.array(v_flat[key])
+				v_flat[key] = np.concatenate(v_flat[key])
 			
 			# Calculate change from old iterate.
 			dx = v_flat["x"] - v_old["x"]
