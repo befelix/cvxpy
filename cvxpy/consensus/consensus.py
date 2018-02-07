@@ -26,6 +26,13 @@ from time import time
 from collections import defaultdict
 from multiprocessing import Process, Pipe
 
+# Flip sign of objective if maximization.
+def flip_obj(prob):
+	if isinstance(prob.objective, Minimize):
+		return prob.objective
+	else:
+		return -prob.objective
+
 # Spectral step size.
 def step_ls(p, d):
 	sd = np.sum(d**2)/np.sum(p*d)   # Steepest descent
@@ -82,26 +89,11 @@ def proc_results(p_list, xbars):
 	# TODO: Save dual values (for constraints too?).
 	
 	# Compute full objective.
-	val = 0
-	for p in p_list:
-		# Flip sign of objective if maximization.
-		if isinstance(p.objective, Minimize):
-			val += p.objective.value
-		else:
-			val -= p.objective.value
+	val = sum([flip_obj(p).value for p in p_list])
 	return val
 
-def run_worker(p, rho_init, pipe):
-	# TODO: Make these user parameters
-	Tf = 2
-	eps = 0.2
-	C = 1e10
-	
-	# Flip sign of objective if maximization.
-	if isinstance(p.objective, Minimize):
-		f = p.objective.args[0]
-	else:
-		f = -p.objective.args[0]
+def run_worker(pipe, p, rho_init, Tf, eps, C):
+	f = flip_obj(p).args[0]
 	cons = p.constraints
 	
 	# Add penalty for each variable.
@@ -165,11 +157,16 @@ def run_worker(p, rho_init, pipe):
 			for key in v_flat.keys():
 				v_old[key] = v_flat[key]
 
-def consensus(p_list, rho_list = None, max_iter = 100):
+def consensus(p_list, max_iter = 100, rho_init = None, **kwargs):
 	# Number of problems.
 	N = len(p_list)
-	if rho_list is None:
-		rho_list = N*[1.0]
+	if rho_init is None:
+		rho_init = N*[1.0]
+	
+	# Step size parameters
+	Tf = kwargs["Tf"] if "Tf" in kwargs else 2
+	eps = kwargs["eps"] if "eps" in kwargs else 0.2
+	C = kwargs["C"] if "C" in kwargs else 1e10
 	
 	# Set up the workers.
 	pipes = []
@@ -177,7 +174,7 @@ def consensus(p_list, rho_list = None, max_iter = 100):
 	for i in range(N):
 		local, remote = Pipe()
 		pipes += [local]
-		procs += [Process(target = run_worker, args = (p_list[i], rho_list[i], remote))]
+		procs += [Process(target = run_worker, args = (remote, p_list[i], rho_init[i], Tf, eps, C))]
 		procs[-1].start()
 
 	# ADMM loop.
@@ -206,17 +203,9 @@ def consensus(p_list, rho_list = None, max_iter = 100):
 	obj_val = proc_results(p_list, xbars)
 	return obj_val, (end - start)
 
-def solve_combined(p_list):
-	obj = 0
-	cons = []
-	for p in p_list:
-		if isinstance(p.objective, Minimize):
-			f = p.objective.args[0]
-		else:
-			f = -p.objective.args[0]
-		obj += f
-		cons += p.constraints
-
+def solve_combined(p_list):	
+	obj = sum([flip_obj(p).args[0] for p in p_list])
+	cons = [c for c in p.constraints for p in p_list]
 	prob = Problem(Minimize(obj), cons)
 	return prob.solve()
 
@@ -243,7 +232,7 @@ def basic_test():
 	pvars = list(set().union(*pvars))   # Variables of problems.
 	
 	# Solve with consensus ADMM.
-	obj_admm, elapsed = consensus(p_list, rho_list = N*[0.5], max_iter = max_iter)
+	obj_admm, elapsed = consensus(p_list, rho_list = N*[1.0], max_iter = max_iter)
 	x_admm = [x.value for x in pvars]
 
 	# Solve combined problem.
