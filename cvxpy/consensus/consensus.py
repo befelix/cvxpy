@@ -47,8 +47,24 @@ def step_ls(p, d):
 def step_cor(p, d):
 	return np.sum(p*d)/np.sqrt(np.sum(p**2)*np.sum(d**2))
 
-# Safeguarding rule.
-def step_safe(a, b, a_cor, b_cor, tau, eps = 0.2):
+def step_safe(rho, a, b, a_cor, b_cor, eps = 0.2):
+	"""Safeguarding rule for spectral step size update.
+	
+	Parameters
+	----------
+    rho : float
+        The current step size.
+    a : float
+        Reciprocal of the curvature parameter alpha.
+    b : float
+        Reciprocal of the curvature parameter beta.
+    a_cor : float
+        Correlation of the curvature parameter alpha.
+    b_cor : float
+        Correlation of the curvature parameter beta.
+    eps : float, optional
+        The safeguarding threshold.
+	"""
 	if a_cor > eps and b_cor > eps:
 		return np.sqrt(a*b)
 	elif a_cor > eps and b_cor <= eps:
@@ -56,15 +72,42 @@ def step_safe(a, b, a_cor, b_cor, tau, eps = 0.2):
 	elif a_cor <= eps and b_cor > eps:
 		return b
 	else:
-		return tau
+		return rho
 
-def step_spec(rho, dx, dxbar, du, duhat, k, eps = 0.2, C = 1e10):
+def step_spec(rho, k, dx, dxbar, du, duhat, eps = 0.2, C = 1e10):
+	"""Calculates the generalized spectral step size with safeguarding.
+	Xu, Taylor, et al. "Adaptive Consensus ADMM for Distributed Optimization."
+	
+	Parameters
+    ----------
+    rho : float
+        The current step size.
+    k : int
+        The current iteration.
+    dx : array
+        Change in primal value from the last step size update.
+    dxbar : array
+        Change in average primal value from the last step size update.
+    du : array
+        Change in dual value from the last step size update.
+    duhat : array
+        Change in intermediate dual value from the last step size update.
+    eps : float, optional
+        The safeguarding threshold.
+    C : float, optional
+        The convergence constant.
+    
+    Returns
+    ----------
+    float
+        The spectral step size for the next iteration.
+	"""
 	# Use old step size if unable to solve LS problem/correlations.
 	if sum(dx**2) == 0 or sum(dxbar**2) == 0 or \
 	   sum(du**2) == 0 or sum(duhat**2) == 0:
 	   return rho
 	
-	# Compute spectral step sizes.
+	# Compute spectral step size.
 	a_hat = step_ls(dx, duhat)
 	b_hat = step_ls(dxbar, du)
 	
@@ -72,25 +115,10 @@ def step_spec(rho, dx, dxbar, du, duhat, k, eps = 0.2, C = 1e10):
 	a_cor = step_cor(dx, duhat)
 	b_cor = step_cor(dxbar, du)
 	
-	# Update step size.
+	# Apply safeguarding rule.
 	scale = 1 + C/(1.0*k**2)
-	rho_hat = step_safe(a_hat, b_hat, a_cor, b_cor, rho, eps)
+	rho_hat = step_safe(rho, a_hat, b_hat, a_cor, b_cor, eps)
 	return max(min(rho_hat, scale*rho), rho/scale)
-
-def proc_results(p_list, xbars):
-	# TODO: Handle statuses.
-	
-	# Save primal values.
-	pvars = [p.variables() for p in p_list]
-	pvars = list(set().union(*pvars))
-	for x in pvars:
-		x.save_value(xbars[x.id])
-	
-	# TODO: Save dual values (for constraints too?).
-	
-	# Compute full objective.
-	val = sum([flip_obj(p).value for p in p_list])
-	return val
 
 def run_worker(pipe, p, rho_init, Tf, eps, C):
 	f = flip_obj(p).args[0]
@@ -151,19 +179,18 @@ def run_worker(pipe, p, rho_init, Tf, eps, C):
 			duhat = v_flat["uhat"] - v_old["uhat"]
 			
 			# Update step size.
-			rho.value = step_spec(rho.value, dx, dxbar, du, duhat, i, eps, C)
+			rho.value = step_spec(rho.value, i, dx, dxbar, du, duhat, eps, C)
 			
 			# Update step size variables.
 			for key in v_flat.keys():
 				v_old[key] = v_flat[key]
 
 def consensus(p_list, max_iter = 100, rho_init = None, **kwargs):
-	# Number of problems.
-	N = len(p_list)
+	N = len(p_list)   # Number of problems.
 	if rho_init is None:
 		rho_init = N*[1.0]
 	
-	# Step size parameters
+	# Step size parameters.
 	Tf = kwargs["Tf"] if "Tf" in kwargs else 2
 	eps = kwargs["eps"] if "eps" in kwargs else 0.2
 	C = kwargs["C"] if "C" in kwargs else 1e10
@@ -200,54 +227,4 @@ def consensus(p_list, max_iter = 100, rho_init = None, **kwargs):
 	end = time()
 
 	[p.terminate() for p in procs]
-	obj_val = proc_results(p_list, xbars)
-	return obj_val, (end - start)
-
-def solve_combined(p_list):	
-	obj = sum([flip_obj(p).args[0] for p in p_list])
-	cons = [c for c in p.constraints for p in p_list]
-	prob = Problem(Minimize(obj), cons)
-	return prob.solve()
-
-def basic_test():
-	np.random.seed(1)
-	m = 100
-	n = 10
-	max_iter = 10
-	x = Variable(n)
-	y = Variable(n/2)
-
-	# Problem data.
-	alpha = 0.5
-	A = np.random.randn(m*n).reshape(m,n)
-	xtrue = np.random.randn(n)
-	b = A.dot(xtrue) + np.random.randn(m)
-
-	# List of all the problems with objective f_i.
-	p_list = [Problem(Minimize(sum_squares(A*x-b)), [norm(x,2) <= 1]),
-			  Problem(Minimize((1-alpha)*sum_squares(y)/2))
-			 ]
-	N = len(p_list)   # Number of problems.
-	pvars = [p.variables() for p in p_list]
-	pvars = list(set().union(*pvars))   # Variables of problems.
-	
-	# Solve with consensus ADMM.
-	obj_admm, elapsed = consensus(p_list, rho_list = N*[1.0], max_iter = max_iter)
-	x_admm = [x.value for x in pvars]
-
-	# Solve combined problem.
-	obj_comb = solve_combined(p_list)
-	x_comb = [x.value for x in pvars]
-
-	# Compare results.
-	for i in range(N):
-		print "ADMM Solution:\n", x_admm[i]
-		print "Base Solution:\n", x_comb[i]
-		print "MSE: ", np.mean(np.square(x_admm[i] - x_comb[i])), "\n"
-	print "ADMM Objective: %f" % obj_admm
-	print "Base Objective: %f" % obj_comb
-	print "Elapsed Time: %f" % elapsed
-
-from cvxpy import *
-basic_test()
-
+	return {"xbars": xbars, "solve_time": (end - start)}

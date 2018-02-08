@@ -18,4 +18,4 @@ along with CVXPY.  If not, see <http://www.gnu.org/licenses/>.
 """
 
 from cvxpy.consensus.anderson import anderson_accel
-from cvxpy.consensus.consensus import consensus, get_combined_prob
+from cvxpy.consensus.consensus import consensus
