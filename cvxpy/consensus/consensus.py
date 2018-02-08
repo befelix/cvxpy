@@ -26,8 +26,9 @@ from time import time
 from collections import defaultdict
 from multiprocessing import Process, Pipe
 
-# Flip sign of objective if maximization.
 def flip_obj(prob):
+	"""Helper function to flip sign of objective function.
+	"""
 	if isinstance(prob.objective, Minimize):
 		return prob.objective
 	else:
@@ -35,6 +36,20 @@ def flip_obj(prob):
 
 # Spectral step size.
 def step_ls(p, d):
+	"""Least squares estimator for spectral step size.
+	
+	Parameters
+	----------
+	p : array
+	     Change in primal variable.
+	d : array
+	     Change in dual variable.
+	
+	Returns
+	----------
+	float
+	     The least squares estimate.
+	"""
 	sd = np.sum(d**2)/np.sum(p*d)   # Steepest descent
 	mg = np.sum(p*d)/np.sum(p**2)   # Minimum gradient
 	
@@ -43,8 +58,21 @@ def step_ls(p, d):
 	else:
 		return (sd - mg)
 
-# Step size correlation.
 def step_cor(p, d):
+	"""Correlation coefficient.
+	
+	Parameters
+	----------
+	p : array
+	     First vector.
+	d : array
+	     Second vector.
+	
+	Returns
+	----------
+	float
+	     The correlation between two vectors.
+	"""
 	return np.sum(p*d)/np.sqrt(np.sum(p**2)*np.sum(d**2))
 
 def step_safe(rho, a, b, a_cor, b_cor, eps = 0.2):
@@ -120,7 +148,12 @@ def step_spec(rho, k, dx, dxbar, du, duhat, eps = 0.2, C = 1e10):
 	rho_hat = step_safe(rho, a_hat, b_hat, a_cor, b_cor, eps)
 	return max(min(rho_hat, scale*rho), rho/scale)
 
-def run_worker(pipe, p, rho_init, Tf, eps, C):
+def run_worker(pipe, p, rho_init, **kwargs):
+	# Step size parameters.
+	Tf = kwargs.pop("Tf", 2)
+	eps = kwargs.pop("eps", 0.2)
+	C = kwargs.pop("C", 1e10)
+	
 	f = flip_obj(p).args[0]
 	cons = p.constraints
 	
@@ -142,7 +175,7 @@ def run_worker(pipe, p, rho_init, Tf, eps, C):
 	
 	# ADMM loop.
 	while True:
-		prox.solve()
+		prox.solve(**kwargs)
 		xvals = {}
 		for xvar in prox.variables():
 			xvals[xvar.id] = xvar.value
@@ -185,15 +218,10 @@ def run_worker(pipe, p, rho_init, Tf, eps, C):
 			for key in v_flat.keys():
 				v_old[key] = v_flat[key]
 
-def consensus(p_list, max_iter = 100, rho_init = None, **kwargs):
+def consensus(p_list, *args, **kwargs):   # TODO: Pass *args to prox solver?
 	N = len(p_list)   # Number of problems.
-	if rho_init is None:
-		rho_init = N*[1.0]
-	
-	# Step size parameters.
-	Tf = kwargs["Tf"] if "Tf" in kwargs else 2
-	eps = kwargs["eps"] if "eps" in kwargs else 0.2
-	C = kwargs["C"] if "C" in kwargs else 1e10
+	max_iter = kwargs.pop("max_iter", 100)
+	rho_init = kwargs.pop("rho_init", N*[1.0])
 	
 	# Set up the workers.
 	pipes = []
@@ -201,7 +229,7 @@ def consensus(p_list, max_iter = 100, rho_init = None, **kwargs):
 	for i in range(N):
 		local, remote = Pipe()
 		pipes += [local]
-		procs += [Process(target = run_worker, args = (remote, p_list[i], rho_init[i], Tf, eps, C))]
+		procs += [Process(target = run_worker, args = (remote, p_list[i], rho_init[i]), kwargs = kwargs)]
 		procs[-1].start()
 
 	# ADMM loop.

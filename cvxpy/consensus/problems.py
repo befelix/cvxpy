@@ -204,7 +204,7 @@ def basic_test():
 	N = len(p_list)   # Number of problems.
 	
 	# Solve with consensus ADMM.
-	obj_admm = probs.solve(method = "consensus", rho_list = N*[1.0], max_iter = max_iter)
+	obj_admm = probs.solve(method = "consensus", rho_init = N*[1.0], max_iter = max_iter)
 	x_admm = [x.value for x in probs.variables()]
 
 	# Solve combined problem.
